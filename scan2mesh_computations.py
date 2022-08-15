@@ -24,6 +24,7 @@ def rigid_scan_2_mesh_alignment(scan, mesh, visualize=False):
     options['disp'] = 1.0
     options['delta_0'] = 0.1
     options['e_3'] = 1e-4
+    options['disp'] = False
 
     s = ch.ones(1)
     r = ch.zeros(3)

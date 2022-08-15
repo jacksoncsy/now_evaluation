@@ -13,13 +13,14 @@ from glob import glob
 import sys
 import numpy as np
 import scan2mesh_computations as s2m_opt
-import matplotlib.pyplot as plt
+import multiprocessing
+
 from psbody.mesh import Mesh
-import chumpy as ch
+from pathlib import Path
+
 
 def load_pp(fname):
     lamdmarks = np.zeros([7,3]).astype(np.float32)
-    # import ipdb; ipdb.set_trace()
     with open(fname, 'r') as f:
         lines = f.readlines()
         for j in range(8,15): # for j in xrange(9,15):
@@ -39,6 +40,7 @@ def load_pp(fname):
             # import ipdb; ipdb.set_trace()
     return lamdmarks
 
+
 def load_txt(fname):
     landmarks = []#np.zeros([7,3]).astype(np.float32)
     with open(fname, 'r') as f:
@@ -52,24 +54,51 @@ def load_txt(fname):
     lmks = landmarks
     return lmks
 
-def compute_error_metric(gt_path, gt_lmk_path, predicted_mesh_path, predicted_lmk_path):
-    groundtruth_scan = Mesh(filename=gt_path)
-    grundtruth_landmark_points = load_pp(gt_lmk_path)
-    predicted_mesh = predicted_mesh_path
-    predicted_mesh_landmark_points = predicted_lmk_path
-    distances =  s2m_opt.compute_errors(groundtruth_scan.v, groundtruth_scan.f, grundtruth_landmark_points, predicted_mesh.v,
-                                          predicted_mesh.f, predicted_mesh_landmark_points)
-    return np.stack(distances)
 
-def metric_computation(dataset_folder,
-                       predicted_mesh_folder,
-                       gt_mesh_folder=None,
-                       gt_lmk_folder=None,
-                       image_set='val',
-                       imgs_list=None,
-                       challenge='',
-                       error_out_path=None,
-                       method_identifier=''):
+def compute_error_metric(path_dict):
+    distances = None
+    try:
+        gt_mesh_path = path_dict["gt_mesh_path"]
+        gt_lmk_path = path_dict["gt_lmk_path"]
+        predicted_mesh_path = path_dict["predicted_mesh_path"]
+        predicted_lmk_path = path_dict["predicted_lmk_path"]
+
+        groundtruth_scan = Mesh(filename=gt_mesh_path)
+        grundtruth_landmarks = load_pp(gt_lmk_path)
+
+        predicted_mesh = Mesh(filename=predicted_mesh_path)
+        extension = Path(predicted_lmk_path).suffix
+        predicted_mesh_landmarks = \
+            np.load(predicted_lmk_path) \
+            if extension == ".npy" else load_txt(predicted_lmk_path)
+
+        distances = s2m_opt.compute_errors(
+            groundtruth_scan.v,
+            groundtruth_scan.f,
+            grundtruth_landmarks,
+            predicted_mesh.v,
+            predicted_mesh.f,
+            predicted_mesh_landmarks,
+        )
+
+        distances = np.stack(distances)
+    except BaseException as e:
+        print(e)
+    
+    return distances
+    
+
+def metric_computation(
+    dataset_folder,
+    predicted_mesh_folder,
+    gt_mesh_folder=None,
+    gt_lmk_folder=None,
+    image_set='val',
+    imgs_list=None,
+    challenge='',
+    error_out_path=None,
+    method_identifier='',
+):
     '''
     :param dataset_folder: Path to root of the dataset, which contains images, scans and lanmarks
     :param predicted_mesh_folder: Path to predicted restuls to be evaluated
@@ -113,6 +142,10 @@ def metric_computation(dataset_folder,
     valid_challenges = ['', 'multiview_neutral', 'multiview_expressions', 'multiview_occlusions', 'selfie']
     if challenge not in valid_challenges:
         raise ValueError(f"Invalid challenge value '{challenge}'. Accepted values are: {', '.join(valid_challenges)}")
+    if challenge == "":
+        print(f"Compute errors for whole NoW challenge")
+    else:
+        print(f"Compute errors for challenge {challenge}")
 
     if not os.path.exists(predicted_mesh_folder):
         print('Predicted mesh path not found - %s' % predicted_mesh_folder)
@@ -123,11 +156,10 @@ def metric_computation(dataset_folder,
     if not os.path.exists(error_out_path):
         os.makedirs(error_out_path)
 
-    distance_metric = []
-    
     with open(imgs_list,'r') as f:
         lines = f.read().splitlines()
-
+    
+    path_dicts = []
     for i in range(len(lines)):
         subject = lines[i].split('/')[-3]
         experiments = lines[i].split('/')[-2]
@@ -135,49 +167,69 @@ def metric_computation(dataset_folder,
         
         if challenge != '':
             if experiments != challenge: 
-                continue
-
-        print('Processing %d of %d (%s, %s, %s)' % (i+1, len(lines), subject, experiments, filename))
+                continue  
+        
+        gt_mesh_path = glob(os.path.join(gt_mesh_folder, subject, '*.obj'))[0]
+        gt_lmk_path = glob(os.path.join(gt_lmk_folder, subject, '*.pp'))[0]
 
         predicted_mesh_path = os.path.join(predicted_mesh_folder, subject, experiments, filename[:-4] + '.obj')
-        predicted_landmarks_path_npy = os.path.join(predicted_mesh_folder, subject, experiments, filename[:-4] + '.npy')
-        predicted_landmarks_path_txt = os.path.join(predicted_mesh_folder, subject, experiments, filename[:-4] + '.txt')       
-
-        gt_mesh_path = glob(os.path.join(gt_mesh_folder, subject, '*.obj'))[0]
-        gt_lmk_path = (glob(os.path.join(gt_lmk_folder, subject, '*.pp'))[0])
-
         if not os.path.exists(predicted_mesh_path):
             print('Predicted mesh not found - Resulting error is insufficient for comparison')
             print(predicted_mesh_path)
             continue
-        if not os.path.exists(predicted_landmarks_path_npy) and not os.path.exists(predicted_landmarks_path_txt):
+
+        predicted_lmk_path_npy = os.path.join(predicted_mesh_folder, subject, experiments, filename[:-4] + '.npy')
+        predicted_lmk_path_txt = os.path.join(predicted_mesh_folder, subject, experiments, filename[:-4] + '.txt')  
+        if os.path.exists(predicted_lmk_path_npy):
+            predicted_lmk_path = predicted_lmk_path_npy
+        elif os.path.exists(predicted_lmk_path_txt):
+            predicted_lmk_path = predicted_lmk_path_txt
+        else:
             print('Predicted mesh landmarks not found - Resulting error is insufficient for comparison')
             continue
 
-        predicted_mesh = Mesh(filename=predicted_mesh_path)
-
-        if os.path.exists(predicted_landmarks_path_npy):
-            predicted_lmks = np.load(predicted_landmarks_path_npy)
-        else:
-            predicted_lmks = load_txt(predicted_landmarks_path_txt)
-
-        distances = compute_error_metric(gt_mesh_path, gt_lmk_path, predicted_mesh, predicted_lmks)
-        print(distances)
+        path_dict = {
+            "gt_mesh_path": gt_mesh_path,
+            "gt_lmk_path": gt_lmk_path,
+            "predicted_mesh_path": predicted_mesh_path,
+            "predicted_lmk_path": predicted_lmk_path,
+        }
         
-        distance_metric.append(distances)
+        path_dicts.append(path_dict)
+
+    # open multiple processes for the computation
+    n_process = max(4, os.cpu_count()//8)
+    with multiprocessing.Pool(processes=n_process) as pool:
+        distances_list = pool.map(compute_error_metric, path_dicts)
+
+    distance_metric = [item for item in distances_list if item is not None]
+    print(f"Compute errors for {len(distance_metric)} out of {len(distances_list)} examples!")
 
     errors = np.hstack(distance_metric)
-    print(f"median: {np.median(errors)}, mean: {np.mean(errors)}, std: {np.std(errors)}")
+    error_dict = {
+        "median": np.median(errors),
+        "mean": np.mean(errors), 
+        "std": np.std(errors),
+    }
+    print(f"median: {np.median(errors):.2f}, mean: {np.mean(errors):.2f}, std: {np.std(errors):.2f}")
 
     computed_distances = {'computed_distances': distance_metric}
     if challenge == '':
-        np.save(os.path.join(error_out_path, '%s_computed_distances.npy' % method_identifier), computed_distances)
+        np.save(
+            os.path.join(error_out_path, '%s_computed_distances.npy' % method_identifier),
+            computed_distances,
+        )
     else: 
-        np.save(os.path.join(error_out_path, '%s_computed_distances_%s.npy' % (method_identifier, challenge)), computed_distances)
+        np.save(
+            os.path.join(error_out_path, '%s_computed_distances_%s.npy' % (method_identifier, challenge)),
+            computed_distances,
+        )
+
+    return error_dict
+
 
 if __name__ == '__main__':
     # Computation of the s2m error
-
     nargs = len(sys.argv)
 
     dataset_folder = sys.argv[1]
@@ -211,8 +263,14 @@ if __name__ == '__main__':
     imgs_list = None
     challenge = ''
 
-    metric_computation(dataset_folder, predicted_mesh_folder, gt_mesh_folder, gt_lmk_folder, image_set, imgs_list,
-                       challenge=challenge,
-                       error_out_path=error_out_path,
-                       method_identifier=method_identifier
-                       )
+    metric_computation(
+        dataset_folder,
+        predicted_mesh_folder,
+        gt_mesh_folder,
+        gt_lmk_folder,
+        image_set,
+        imgs_list,
+        challenge=challenge,
+        error_out_path=error_out_path,
+        method_identifier=method_identifier,
+    )
